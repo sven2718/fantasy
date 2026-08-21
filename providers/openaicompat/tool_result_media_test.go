@@ -207,3 +207,86 @@ func TestToPromptFunc_MediaToolResult_UnsupportedMediaType(t *testing.T) {
 	require.Len(t, warnings, 1)
 	require.Contains(t, warnings[0].Message, "video/mp4")
 }
+
+// A parallel tool-call batch whose results all carry media must keep every
+// tool message contiguous after the assistant message: chat-completions
+// validators (OpenAI's own, and stricter backends like Moonshot/Kimi) reject
+// the request when a user message splits the tool-message run, reporting the
+// tool_call_ids after the split as unanswered. The synthetic user messages
+// holding the media belong after the whole run.
+func TestToPromptFunc_MediaToolResult_ParallelBatchDeferred(t *testing.T) {
+	t.Parallel()
+
+	imageData := base64.StdEncoding.EncodeToString([]byte{1, 2, 3})
+	mediaResult := func(id string) fantasy.MessagePart {
+		return fantasy.ToolResultPart{
+			ToolCallID: id,
+			Output: fantasy.ToolResultOutputContentMedia{
+				Data:      imageData,
+				MediaType: "image/png",
+			},
+		}
+	}
+	prompt := fantasy.Prompt{
+		{
+			Role: fantasy.MessageRoleAssistant,
+			Content: []fantasy.MessagePart{
+				fantasy.ToolCallPart{ToolCallID: "img-1", ToolName: "view", Input: "{}"},
+				fantasy.ToolCallPart{ToolCallID: "img-2", ToolName: "view", Input: "{}"},
+			},
+		},
+		{Role: fantasy.MessageRoleTool, Content: []fantasy.MessagePart{mediaResult("img-1")}},
+		{Role: fantasy.MessageRoleTool, Content: []fantasy.MessagePart{mediaResult("img-2")}},
+		{Role: fantasy.MessageRoleUser, Content: []fantasy.MessagePart{fantasy.TextPart{Text: "next"}}},
+	}
+
+	messages, warnings := ToPromptFunc(prompt, "", "")
+
+	require.Empty(t, warnings)
+	// Assistant, two tool messages, two deferred user image messages, user.
+	require.Len(t, messages, 6)
+	require.NotNil(t, messages[1].OfTool)
+	require.Equal(t, "img-1", messages[1].OfTool.ToolCallID)
+	require.NotNil(t, messages[2].OfTool)
+	require.Equal(t, "img-2", messages[2].OfTool.ToolCallID)
+	require.NotNil(t, messages[3].OfUser)
+	require.NotNil(t, messages[3].OfUser.Content.OfArrayOfContentParts[0].OfImageURL)
+	require.NotNil(t, messages[4].OfUser)
+	require.NotNil(t, messages[4].OfUser.Content.OfArrayOfContentParts[0].OfImageURL)
+	require.NotNil(t, messages[5].OfUser)
+}
+
+// When the tool run ends the prompt, the deferred media messages flush at
+// the end rather than being lost.
+func TestToPromptFunc_MediaToolResult_DeferredFlushAtEnd(t *testing.T) {
+	t.Parallel()
+
+	imageData := base64.StdEncoding.EncodeToString([]byte{4, 5, 6})
+	prompt := fantasy.Prompt{
+		{
+			Role: fantasy.MessageRoleAssistant,
+			Content: []fantasy.MessagePart{
+				fantasy.ToolCallPart{ToolCallID: "img-1", ToolName: "view", Input: "{}"},
+			},
+		},
+		{
+			Role: fantasy.MessageRoleTool,
+			Content: []fantasy.MessagePart{
+				fantasy.ToolResultPart{
+					ToolCallID: "img-1",
+					Output: fantasy.ToolResultOutputContentMedia{
+						Data:      imageData,
+						MediaType: "image/png",
+					},
+				},
+			},
+		},
+	}
+
+	messages, warnings := ToPromptFunc(prompt, "", "")
+
+	require.Empty(t, warnings)
+	require.Len(t, messages, 3)
+	require.NotNil(t, messages[1].OfTool)
+	require.NotNil(t, messages[2].OfUser)
+}
