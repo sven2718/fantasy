@@ -305,7 +305,19 @@ func DefaultStreamProviderMetadataFunc(choice openai.ChatCompletionChoice, metad
 func DefaultToPrompt(prompt fantasy.Prompt, _, _ string) ([]openai.ChatCompletionMessageParamUnion, []fantasy.CallWarning) {
 	var messages []openai.ChatCompletionMessageParamUnion
 	var warnings []fantasy.CallWarning
+	// Synthetic user messages holding tool-result media (see
+	// ToolResultMediaMessages) are deferred until the contiguous run of
+	// tool messages ends. Chat-completions validators — OpenAI's own, and
+	// stricter OpenAI-compatible backends such as Moonshot/Kimi — require
+	// every tool message answering an assistant's tool_calls to immediately
+	// follow that assistant message; a user message emitted between two
+	// tool messages invalidates every tool result that comes after it.
+	var deferredMedia []openai.ChatCompletionMessageParamUnion
 	for _, msg := range prompt {
+		if msg.Role != fantasy.MessageRoleTool && len(deferredMedia) > 0 {
+			messages = append(messages, deferredMedia...)
+			deferredMedia = nil
+		}
 		switch msg.Role {
 		case fantasy.MessageRoleSystem:
 			var systemPromptParts []string
@@ -593,7 +605,8 @@ func DefaultToPrompt(prompt fantasy.Prompt, _, _ string) ([]openai.ChatCompletio
 					// OpenAI Chat Completions tool messages cannot carry image
 					// or audio content directly; see ToolResultMediaMessages.
 					mediaMessages, mediaWarnings := ToolResultMediaMessages(output, toolResultPart.ToolCallID)
-					messages = append(messages, mediaMessages...)
+					messages = append(messages, mediaMessages[0])
+					deferredMedia = append(deferredMedia, mediaMessages[1:]...)
 					warnings = append(warnings, mediaWarnings...)
 				default:
 					warnings = append(warnings, fantasy.CallWarning{
@@ -604,6 +617,7 @@ func DefaultToPrompt(prompt fantasy.Prompt, _, _ string) ([]openai.ChatCompletio
 			}
 		}
 	}
+	messages = append(messages, deferredMedia...)
 	return messages, warnings
 }
 
@@ -613,6 +627,11 @@ func DefaultToPrompt(prompt fantasy.Prompt, _, _ string) ([]openai.ChatCompletio
 // placeholder describing the media) to keep the tool_call/tool_result pairing
 // valid, followed by a synthetic user message holding the actual image or
 // audio content part so vision- and audio-capable models can see it.
+//
+// Callers converting a whole prompt should emit the returned tool message
+// inline but defer the synthetic user message until the contiguous run of
+// tool messages ends (see DefaultToPrompt), so the user message cannot split
+// the tool messages answering a parallel tool-call batch.
 //
 // Unsupported media types produce only the text tool message plus a warning.
 // This is shared with OpenAI-compatible providers, which face the same
