@@ -3282,6 +3282,40 @@ func TestMapFinishReason(t *testing.T) {
 	}
 }
 
+func TestToPrompt_PreservesMidConversationSystemMessages(t *testing.T) {
+	t.Parallel()
+
+	prompt := fantasy.Prompt{
+		fantasy.NewSystemMessage("base instructions"),
+		fantasy.NewUserMessage("start"),
+		{Role: fantasy.MessageRoleAssistant, Content: []fantasy.MessagePart{
+			fantasy.ToolCallPart{ToolCallID: "one", ToolName: "first", Input: "{}"},
+			fantasy.ToolCallPart{ToolCallID: "two", ToolName: "second", Input: "{}"},
+		}},
+		{Role: fantasy.MessageRoleTool, Content: []fantasy.MessagePart{
+			fantasy.ToolResultPart{ToolCallID: "one", Output: fantasy.ToolResultOutputContentText{Text: "one"}},
+			fantasy.ToolResultPart{ToolCallID: "two", Output: fantasy.ToolResultOutputContentText{Text: "two"}},
+		}},
+		fantasy.NewSystemMessage("first appended instruction"),
+		fantasy.NewSystemMessage("second appended instruction"),
+		{Role: fantasy.MessageRoleAssistant, Content: []fantasy.MessagePart{fantasy.TextPart{Text: "done"}}},
+	}
+
+	system, messages, warnings := toPrompt(prompt, true)
+	require.Empty(t, warnings)
+	require.Len(t, system, 1)
+	require.Equal(t, "base instructions", system[0].Text)
+	require.Len(t, messages, 5)
+	require.Equal(t, anthropic.MessageParamRoleUser, messages[0].Role)
+	require.Equal(t, anthropic.MessageParamRoleAssistant, messages[1].Role)
+	require.Equal(t, anthropic.MessageParamRoleUser, messages[2].Role)
+	require.Equal(t, anthropic.MessageParamRoleSystem, messages[3].Role)
+	require.Equal(t, anthropic.MessageParamRoleAssistant, messages[4].Role)
+	require.Len(t, messages[3].Content, 2)
+	require.Equal(t, "first appended instruction", messages[3].Content[0].OfText.Text)
+	require.Equal(t, "second appended instruction", messages[3].Content[1].OfText.Text)
+}
+
 // A long reasoning turn sends pings and nothing else. Those have to reach the
 // consumer, or an idle-timeout watchdog cannot tell a thinking model from a
 // dead connection.
