@@ -902,12 +902,7 @@ func toPrompt(prompt fantasy.Prompt, sendReasoningData bool) ([]anthropic.TextBl
 	for _, block := range blocks {
 		switch block.Role {
 		case fantasy.MessageRoleSystem:
-			if finishedSystemBlock {
-				// skip multiple system messages that are separated by user/assistant messages
-				// TODO: see if we need to send error here?
-				continue
-			}
-			finishedSystemBlock = true
+			var content []anthropic.ContentBlockParamUnion
 			for _, msg := range block.Messages {
 				for i, part := range msg.Content {
 					isLastPart := i == len(msg.Content)-1
@@ -919,15 +914,29 @@ func toPrompt(prompt fantasy.Prompt, sendReasoningData bool) ([]anthropic.TextBl
 					if !ok {
 						continue
 					}
-					textBlock := anthropic.TextBlockParam{
-						Text: text.Text,
-					}
+					textBlock := anthropic.TextBlockParam{Text: text.Text}
 					if cacheControl != nil {
 						textBlock.CacheControl = anthropic.NewCacheControlEphemeralParam()
 					}
-					systemBlocks = append(systemBlocks, textBlock)
+					if finishedSystemBlock {
+						content = append(content, anthropic.ContentBlockParamUnion{OfText: &textBlock})
+					} else {
+						systemBlocks = append(systemBlocks, textBlock)
+					}
 				}
 			}
+			if finishedSystemBlock && len(content) > 0 {
+				// A later system message is an instruction inserted at this
+				// point in the conversation, not another top-level prompt.
+				// Anthropic uses this for prefix-safe, mid-conversation
+				// instructions; keeping it in messages also preserves the
+				// binding of earlier thinking blocks.
+				messages = append(messages, anthropic.MessageParam{
+					Role:    anthropic.MessageParamRoleSystem,
+					Content: content,
+				})
+			}
+			finishedSystemBlock = true
 
 		case fantasy.MessageRoleUser:
 			var anthropicContent []anthropic.ContentBlockParamUnion
